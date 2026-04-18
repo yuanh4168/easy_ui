@@ -1,0 +1,24 @@
+# 编译输出
+*.exe
+*.o
+*.obj
+*.dll
+*.so
+*.a
+*.lib
+
+# 调试文件
+*.pdb
+*.ilk
+
+# 临时文件
+*~
+*.swp
+*.tmp
+
+# IDE 配置
+.vscode/
+.idea/
+*.user
+*.suo
+
