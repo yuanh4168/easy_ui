@@ -2,7 +2,7 @@
  * @file easy_UI.hpp
  * @brief 轻量化 Windows 原生 UI 渲染库（单头文件实现）
  * 
- * 版本：3.3 (修复文字可见性、动画系统、缩放后位置修正)
+ * 版本：3.4 (最终修复：动画、移动位置、按钮文字自适应)
  * 
  * 编译要求：Windows + C++11 或更高版本
  * 编译命令：g++ -std=c++11 main.cpp -lgdi32 -luser32 -lmsimg32 -lgdiplus -mwindows
@@ -432,35 +432,20 @@ public:
     void set_text(const std::string& n, const std::wstring& t) { auto e = find_by_name(n); if (e) { e->text = t; e->mark_dirty(); InvalidateWindow(); } }
     void set_color(const std::string& n, Color c) { auto e = find_by_name(n); if (e) { e->color = c; e->mark_dirty(); InvalidateWindow(); } }
 
-    // 修正：设置位置时考虑当前缩放比例，将屏幕坐标转换为原始坐标保存
+    // 修正：直接保存传入的坐标作为原始坐标，缩放时基于此坐标计算屏幕位置
     void set_position(const std::string& n, int x, int y) {
         auto e = find_by_name(n); if (!e) return;
         e->x = x; e->y = y;
-        // 获取当前缩放比例
-        if (base_window_width_ > 0 && base_window_height_ > 0) {
-            RECT rc; GetClientRect(active_hwnd_, &rc);
-            float sx = (float)(rc.right - rc.left) / base_window_width_;
-            float sy = (float)(rc.bottom - rc.top) / base_window_height_;
-            e->original_x = static_cast<int>(x / sx);
-            e->original_y = static_cast<int>(y / sy);
-        } else {
-            e->original_x = x; e->original_y = y;
-        }
+        e->original_x = x;
+        e->original_y = y;
         e->mark_dirty(); InvalidateWindow();
     }
 
     void set_size(const std::string& n, int w, int h) {
         auto e = find_by_name(n); if (!e) return;
         e->width = w; e->height = h;
-        if (base_window_width_ > 0 && base_window_height_ > 0) {
-            RECT rc; GetClientRect(active_hwnd_, &rc);
-            float sx = (float)(rc.right - rc.left) / base_window_width_;
-            float sy = (float)(rc.bottom - rc.top) / base_window_height_;
-            e->original_width = static_cast<int>(w / sx);
-            e->original_height = static_cast<int>(h / sy);
-        } else {
-            e->original_width = w; e->original_height = h;
-        }
+        e->original_width = w;
+        e->original_height = h;
         e->mark_dirty(); InvalidateWindow();
     }
 
@@ -774,14 +759,14 @@ private:
 
     void draw_element(HDC hdc, const UIElement* e) {
         float alpha = e->get_alpha();
-        bool need_alpha = (alpha < 0.99f) || e->anim.active;
+        bool need_alpha = (alpha < 0.99f) || (e->anim.active && e->anim.type == AnimationType::Fade);
 
         int offX = e->x, offY = e->y, drawW = e->width, drawH = e->height;
         if (e->anim.active) {
             float t = e->get_anim_progress();
             if (e->anim.type == AnimationType::Slide) {
-                offX = e->anim_original_x + (int)(e->anim_offset_x * (1.0f - t));
-                offY = e->anim_original_y + (int)(e->anim_offset_y * (1.0f - t));
+                offX = e->anim_original_x + (int)(e->anim_offset_x * t);
+                offY = e->anim_original_y + (int)(e->anim_offset_y * t);
             }
             else if (e->anim.type == AnimationType::Scale) {
                 float scale = e->anim.start_value + (e->anim.target_value - e->anim.start_value) * t;
@@ -859,10 +844,25 @@ private:
         SelectObject(hdc, oldBr); DeleteObject(br);
     }
 
+    // 计算背景亮度并返回合适的文字颜色（黑色或白色）
+    Color get_contrast_text_color(Color bgColor) const {
+        BYTE r = (bgColor >> 16) & 0xFF;
+        BYTE g = (bgColor >> 8) & 0xFF;
+        BYTE b = bgColor & 0xFF;
+        // 相对亮度公式
+        float luminance = (0.299f * r + 0.587f * g + 0.114f * b) / 255.0f;
+        return (luminance > 0.5f) ? 0xFF000000 : 0xFFFFFFFF;
+    }
+
     void draw_text(HDC hdc, const UIElement* e, int offX, int offY, int w, int h) {
         if (e->text.empty()) return;
-        // 按钮文字强制白色
-        Color textColor = (e->type == ElementType::Button) ? 0xFFFFFFFF : current_theme_.text_color;
+        Color textColor;
+        if (e->type == ElementType::Button) {
+            Color bg = e->get_draw_color(current_theme_);
+            textColor = get_contrast_text_color(bg);
+        } else {
+            textColor = current_theme_.text_color;
+        }
         SetTextColor(hdc, RGB((textColor>>16)&0xFF, (textColor>>8)&0xFF, textColor&0xFF));
         HFONT fnt = use_custom_font_ ? CreateFontW(custom_font_size_,0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,0,0, antialiasing_enabled_?CLEARTYPE_QUALITY:DEFAULT_QUALITY, DEFAULT_PITCH|FF_DONTCARE, custom_font_name_.c_str()) : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
         HFONT oldFnt = (HFONT)SelectObject(hdc, fnt);
