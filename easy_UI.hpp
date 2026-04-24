@@ -1,6 +1,6 @@
 /*
    easy_UI.hpp - 轻量级 Windows UI 渲染库 (C++11 / Win32 + GDI+)
-   版本: 4.2
+   版本: 4.2 (ComboBox 完全修复)
    描述: 单头文件 UI 库，三层架构分离，全功能封装，零 Win32 消息暴露。
    用法: #include "easy_UI.hpp" 并链接 gdiplus.lib
 */
@@ -258,7 +258,6 @@ namespace Primitives {
 
     using namespace Core;
 
-    // 消除抗锯齿接缝：直接使用 FillRoundRect 绘制完整圆角背景
     inline void DrawBtnBg(Gdiplus::Graphics* g, const RECT& rc, const Color& bg, int radius = 6) {
         FillRoundRect(g, rc, radius, bg);
     }
@@ -311,17 +310,19 @@ namespace Primitives {
     }
 
     inline void DrawComboArrow(Gdiplus::Graphics* g, const RECT& rc, bool expanded, const Color& color) {
-        int cx = (rc.left + rc.right)/2;
-        int cy = (rc.top + rc.bottom)/2;
+        int arrowW = (int)std::max(4L, (rc.right - rc.left) / 4);
+        int arrowH = (int)std::max(4L, (rc.bottom - rc.top) / 3);
+        int cx = (rc.left + rc.right) / 2;
+        int cy = (rc.top + rc.bottom) / 2;
         Gdiplus::Point pts[3];
         if (!expanded) {
-            pts[0] = Gdiplus::Point(cx-4, cy-2);
-            pts[1] = Gdiplus::Point(cx+4, cy-2);
-            pts[2] = Gdiplus::Point(cx, cy+3);
+            pts[0] = Gdiplus::Point(cx - arrowW, cy - arrowH / 2);
+            pts[1] = Gdiplus::Point(cx + arrowW, cy - arrowH / 2);
+            pts[2] = Gdiplus::Point(cx, cy + arrowH / 2);
         } else {
-            pts[0] = Gdiplus::Point(cx-4, cy+2);
-            pts[1] = Gdiplus::Point(cx+4, cy+2);
-            pts[2] = Gdiplus::Point(cx, cy-3);
+            pts[0] = Gdiplus::Point(cx - arrowW, cy + arrowH / 2);
+            pts[1] = Gdiplus::Point(cx + arrowW, cy + arrowH / 2);
+            pts[2] = Gdiplus::Point(cx, cy - arrowH / 2);
         }
         Gdiplus::SolidBrush brush(color);
         g->FillPolygon(&brush, pts, 3);
@@ -386,7 +387,6 @@ namespace Controls {
             DrawString(g, text.empty() ? L" " : text, tr, GetFont("default"), gs.theme.text, sx, sy, Gdiplus::StringAlignmentNear);
         }
         void OnLButtonDown(int,int) override {
-            // 每次点击都激活编辑框，无需 isEditing 标志
             Core::ShowInvisibleEdit(GetRect(), text);
             detail::GS().onEditFinished = [this](const std::wstring& newText) {
                 text = newText;
@@ -402,40 +402,81 @@ namespace Controls {
         int selectedIndex = -1;
         bool expanded = false;
         int itemHeight = 24;
+        int hoveredIndex = -1;
+
         ComboBox(const std::string& name) : Control(name) {}
+
         void Draw(Gdiplus::Graphics* g) override {
             RECT r = GetRect();
             auto& gs = detail::GS();
             DrawBtnBg(g, r, gs.defaultBtnStyle.bgNormal, gs.defaultBtnStyle.radius);
-            RECT textRect = r; textRect.right -= 20;
+
+            int arrowWidth = (int)std::max(16L, (r.right - r.left) / 5);
+            RECT textRect = { r.left, r.top, r.right - arrowWidth, r.bottom };
+            RECT arrowRect = { r.right - arrowWidth, r.top, r.right, r.bottom };
+
             std::wstring txt = (selectedIndex >=0 && selectedIndex < (int)items.size()) ? items[selectedIndex] : L"";
             float sx, sy; GetScale(sx, sy);
             DrawString(g, txt, textRect, GetFont("default"), gs.defaultBtnStyle.textColor, sx, sy, Gdiplus::StringAlignmentNear);
-            RECT arrowRect = { r.right - 20, r.top, r.right, r.bottom };
             DrawComboArrow(g, arrowRect, expanded, gs.defaultBtnStyle.textColor);
+
             if (expanded) {
+                int scaledItemHeight = (int)(itemHeight * sy);
+                if (scaledItemHeight < 20) scaledItemHeight = 20;
                 int y = r.bottom;
                 for (size_t i = 0; i < items.size(); ++i) {
-                    RECT ir = { r.left, y, r.right, y + itemHeight };
-                    FillRect(g, ir, gs.theme.fg);
+                    RECT ir = { r.left, y, r.right, y + scaledItemHeight };
+                    if ((int)i == hoveredIndex) {
+                        FillRect(g, ir, gs.theme.hover);
+                    } else {
+                        FillRect(g, ir, gs.theme.fg);
+                    }
                     DrawString(g, items[i], ir, GetFont("default"), gs.defaultBtnStyle.textColor, sx, sy, Gdiplus::StringAlignmentNear);
-                    y += itemHeight;
+                    y += scaledItemHeight;
                 }
             }
         }
-        void OnLButtonDown(int x, int y) override {
-            if (expanded) {
-                RECT r = GetRect();
-                int baseY = r.bottom;
-                int idx = (y - baseY) / itemHeight;
-                if (x >= r.left && x < r.right && idx >= 0 && idx < (int)items.size()) {
-                    selectedIndex = idx;
-                }
-                expanded = false;
+
+        void OnMouseMove(int x, int y) override {
+            if (!expanded) return;
+            RECT r = GetRect();
+            float sx, sy; GetScale(sx, sy);
+            int scaledItemHeight = (int)(itemHeight * sy);
+            if (scaledItemHeight < 20) scaledItemHeight = 20;
+            int baseY = r.bottom;
+            int idx = (y - baseY) / scaledItemHeight;
+            if (x >= r.left && x < r.right && idx >= 0 && idx < (int)items.size()) {
+                hoveredIndex = idx;
             } else {
-                expanded = true;
+                hoveredIndex = -1;
             }
             InvalidateRect(detail::GS().hwnd, nullptr, FALSE);
+        }
+
+        void OnLButtonDown(int x, int y) override {
+            if (expanded) {
+                // 已经展开：判断点击是否在选项区域
+                RECT r = GetRect();
+                float sx, sy; GetScale(sx, sy);
+                int scaledItemHeight = (int)(itemHeight * sy);
+                if (scaledItemHeight < 20) scaledItemHeight = 20;
+                int baseY = r.bottom;
+                if (y >= baseY && x >= r.left && x < r.right) {
+                    int idx = (y - baseY) / scaledItemHeight;
+                    if (idx >= 0 && idx < (int)items.size()) {
+                        selectedIndex = idx;
+                    }
+                }
+                expanded = false;  // 无论如何关闭下拉
+            } else {
+                expanded = true;   // 打开下拉
+            }
+            InvalidateRect(detail::GS().hwnd, nullptr, FALSE);
+            UpdateWindow(detail::GS().hwnd);
+        }
+
+        void OnMouseLeave() override {
+            hoveredIndex = -1;
         }
     };
 
@@ -591,7 +632,6 @@ inline LRESULT CALLBACK InternalWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                     gs.memBitmap = CreateCompatibleBitmap(hdc, w, h);
                     gs.oldBitmap = (HBITMAP)SelectObject(gs.memDC, gs.memBitmap);
                     gs.bufWidth = w; gs.bufHeight = h;
-                    // 立即清空新缓冲区
                     RECT full = {0,0,w,h};
                     Gdiplus::Graphics gtmp(gs.memDC);
                     Core::FillRect(&gtmp, full, gs.theme.bg);
