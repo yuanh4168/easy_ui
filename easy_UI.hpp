@@ -1,7 +1,7 @@
 /*
    easy_UI.hpp - 轻量级 Windows UI 渲染库 (C++11 / Win32 + GDI+)
-   版本: 4.1 (最终稳定版)
-   描述: 单头文件 UI 库，三层架构分离，支持等比缩放、颜色定制、无闪烁双缓冲。
+   版本: 4.2
+   描述: 单头文件 UI 库，三层架构分离，全功能封装，零 Win32 消息暴露。
    用法: #include "easy_UI.hpp" 并链接 gdiplus.lib
 */
 
@@ -70,7 +70,7 @@ struct Font {
     std::wstring family;
     float size;
     int style;
-    Font(const wchar_t* family = L"Segoe UI", float size = 12.0f, int style = Gdiplus::FontStyleRegular)
+    Font(const wchar_t* family = L"Microsoft YaHei", float size = 12.0f, int style = Gdiplus::FontStyleRegular)
         : family(family), size(size), style(style) {
         ptr = new Gdiplus::Font(family, size, style);
     }
@@ -93,7 +93,6 @@ struct BtnStyle {
           border(80,80,85) {}
 };
 
-// 控件基类（所有交互控件均派生自此类）
 class Control {
 public:
     std::string name;
@@ -102,6 +101,7 @@ public:
     bool enabled = true;
     std::function<void()> onClick;
     std::function<void(const std::wstring&)> onTextChanged;
+    int originalFontSize = 14;
 
     Control(const std::string& name) : name(name) {}
     virtual ~Control() {}
@@ -112,8 +112,8 @@ public:
     virtual void OnMouseLeave() {}
     virtual void OnKeyDown(WPARAM key) {}
 
-    // 获取当前缩放后的矩形（由全局缩放开关决定）
     RECT GetRect() const;
+    void GetScale(float& sx, float& sy) const;
     bool PtInRect(int x, int y) const {
         RECT r = GetRect();
         return x >= r.left && x < r.right && y >= r.top && y < r.bottom;
@@ -121,7 +121,7 @@ public:
 };
 
 // =============================================================================
-// 全局状态（Meyers 单例，兼容 C++11）
+// 全局状态 (Meyers 单例)
 // =============================================================================
 namespace detail {
 
@@ -129,6 +129,7 @@ namespace detail {
         Theme theme;
         BtnStyle defaultBtnStyle;
         std::unordered_map<std::string, std::unique_ptr<Font>> fonts;
+        std::string defaultFontName = "default";
         HWND hwnd = nullptr;
         int baseWidth = 800, baseHeight = 600;
         bool autoScale = false;
@@ -158,7 +159,7 @@ namespace detail {
 } // namespace detail
 
 // =============================================================================
-// 底层 Core：GDI+ 初始化、原子绘图、字体管理、隐形输入框
+// 底层 Core
 // =============================================================================
 namespace Core {
 
@@ -179,7 +180,6 @@ namespace Core {
         detail::GS().fonts[name] = std::unique_ptr<Font>(new Font(family, size, style));
     }
 
-    // 原子绘图辅助类
     class GfxWrap {
         Gdiplus::Graphics* g;
     public:
@@ -192,7 +192,6 @@ namespace Core {
         Gdiplus::Graphics* Get() { return g; }
     };
 
-    // 原子绘图函数
     inline void DrawRect(Gdiplus::Graphics* g, const RECT& rc, const Color& color, float width = 1.0f) {
         Gdiplus::Pen pen(color, width);
         g->DrawRectangle(&pen, (INT)rc.left, (INT)rc.top, (INT)(rc.right - rc.left - 1), (INT)(rc.bottom - rc.top - 1));
@@ -221,18 +220,19 @@ namespace Core {
         Gdiplus::Pen pen(color, width);
         g->DrawPath(&pen, &path);
     }
-    inline void DrawLine(Gdiplus::Graphics* g, int x1, int y1, int x2, int y2, const Color& color, float width = 1.0f) {
-        Gdiplus::Pen pen(color, width);
-        g->DrawLine(&pen, x1, y1, x2, y2);
-    }
     inline void DrawImage(Gdiplus::Graphics* g, Gdiplus::Image* img, const RECT& rc) {
         g->DrawImage(img, (INT)rc.left, (INT)rc.top, (INT)(rc.right - rc.left), (INT)(rc.bottom - rc.top));
     }
     inline void DrawString(Gdiplus::Graphics* g, const std::wstring& text, const RECT& rc, Font* font,
-                           const Color& color,
+                           const Color& color, float scaleX = 1.0f, float scaleY = 1.0f,
                            Gdiplus::StringAlignment alignH = Gdiplus::StringAlignmentCenter,
                            Gdiplus::StringAlignment alignV = Gdiplus::StringAlignmentCenter) {
         if (!font) return;
+        std::unique_ptr<Font> scaledFont;
+        if (scaleX != 1.0f || scaleY != 1.0f) {
+            scaledFont = std::unique_ptr<Font>(new Font(font->family.c_str(), font->size * std::min(scaleX, scaleY), font->style));
+            font = scaledFont.get();
+        }
         Gdiplus::SolidBrush brush(color);
         Gdiplus::StringFormat fmt;
         fmt.SetAlignment(alignH);
@@ -242,12 +242,9 @@ namespace Core {
                       Gdiplus::RectF(rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top),
                       &fmt, &brush);
     }
-    inline void SetClip(Gdiplus::Graphics* g, const RECT& rc) {
-        g->SetClip(Gdiplus::Rect(rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top));
-    }
+    inline void SetClip(Gdiplus::Graphics* g, const RECT& rc) { g->SetClip(Gdiplus::Rect(rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top)); }
     inline void ResetClip(Gdiplus::Graphics* g) { g->ResetClip(); }
 
-    // 隐形输入框（实现稍后）
     inline LRESULT CALLBACK InvisibleEditProc(HWND, UINT, WPARAM, LPARAM);
     inline void CreateInvisibleEdit();
     inline void ShowInvisibleEdit(const RECT& rc, const std::wstring& initialText);
@@ -255,28 +252,15 @@ namespace Core {
 } // namespace Core
 
 // =============================================================================
-// 中层 Primitives：可复用视觉组件
+// 中层 Primitives
 // =============================================================================
 namespace Primitives {
 
     using namespace Core;
 
+    // 消除抗锯齿接缝：直接使用 FillRoundRect 绘制完整圆角背景
     inline void DrawBtnBg(Gdiplus::Graphics* g, const RECT& rc, const Color& bg, int radius = 6) {
-        RECT inner = { rc.left + radius, rc.top, rc.right - radius, rc.bottom };
-        FillRect(g, inner, bg);
-        RECT topBar = { rc.left + radius, rc.top, rc.right - radius, rc.top + radius };
-        FillRect(g, topBar, bg);
-        RECT bottomBar = { rc.left + radius, rc.bottom - radius, rc.right - radius, rc.bottom };
-        FillRect(g, bottomBar, bg);
-        RECT leftBar = { rc.left, rc.top + radius, rc.left + radius, rc.bottom - radius };
-        FillRect(g, leftBar, bg);
-        RECT rightBar = { rc.right - radius, rc.top + radius, rc.right, rc.bottom - radius };
-        FillRect(g, rightBar, bg);
-        Gdiplus::SolidBrush brush(bg);
-        g->FillPie(&brush, (INT)rc.left, (INT)rc.top, (INT)(radius*2), (INT)(radius*2), 180, 90);
-        g->FillPie(&brush, (INT)(rc.right - radius*2 - 1), (INT)rc.top, (INT)(radius*2), (INT)(radius*2), 270, 90);
-        g->FillPie(&brush, (INT)rc.left, (INT)(rc.bottom - radius*2 - 1), (INT)(radius*2), (INT)(radius*2), 90, 90);
-        g->FillPie(&brush, (INT)(rc.right - radius*2 - 1), (INT)(rc.bottom - radius*2 - 1), (INT)(radius*2), (INT)(radius*2), 0, 90);
+        FillRoundRect(g, rc, radius, bg);
     }
 
     inline void DrawBtnState(Gdiplus::Graphics* g, const RECT& rc, BtnState state,
@@ -320,7 +304,7 @@ namespace Primitives {
         DrawRoundRect(g, rc, radius, theme.border);
     }
 
-    inline void DrawShadow(Gdiplus::Graphics* g, const RECT& rc, int offset = 3, int = 5) {
+    inline void DrawShadow(Gdiplus::Graphics* g, const RECT& rc, int offset = 3) {
         auto& theme = detail::GS().theme;
         RECT shadow = { rc.left + offset, rc.top + offset, rc.right + offset, rc.bottom + offset };
         FillRoundRect(g, shadow, theme.cornerRadius, theme.shadow);
@@ -346,7 +330,7 @@ namespace Primitives {
 } // namespace Primitives
 
 // =============================================================================
-// 高层 Controls：具体交互控件
+// 高层 Controls
 // =============================================================================
 namespace Controls {
 
@@ -356,20 +340,18 @@ namespace Controls {
     class Button : public Control {
     public:
         std::wstring text;
-        Font* font = nullptr;
         BtnState state = BtnState::Normal;
         std::unique_ptr<BtnStyle> style;
 
-        Button(const std::string& name, const std::wstring& text) : Control(name), text(text) {
-            font = GetFont("default");
-        }
+        Button(const std::string& name, const std::wstring& text) : Control(name), text(text) {}
         void Draw(Gdiplus::Graphics* g) override {
             auto& gs = detail::GS();
             BtnStyle& st = style ? *style : gs.defaultBtnStyle;
             RECT r = GetRect();
+            float sx, sy; GetScale(sx, sy);
             DrawBtnState(g, r, state, st.bgNormal, st.bgHover, st.bgPressed, st.border, st.radius);
             Color tc = enabled ? st.textColor : st.textDisabled;
-            DrawString(g, text, r, font, tc);
+            DrawString(g, text, r, GetFont("default"), tc, sx, sy);
         }
         void OnMouseMove(int,int) override { state = BtnState::Hover; }
         void OnMouseLeave() override { state = BtnState::Normal; }
@@ -380,49 +362,37 @@ namespace Controls {
     class Label : public Control {
     public:
         std::wstring text;
-        Font* font = nullptr;
         Color textColor = Color(240,240,240);
         Gdiplus::StringAlignment alignH = Gdiplus::StringAlignmentNear;
-        Label(const std::string& name, const std::wstring& text) : Control(name), text(text) {
-            font = GetFont("default");
-        }
+        Label(const std::string& name, const std::wstring& text) : Control(name), text(text) {}
         void Draw(Gdiplus::Graphics* g) override {
             RECT r = GetRect();
-            DrawString(g, text, r, font, textColor, alignH);
+            float sx, sy; GetScale(sx, sy);
+            DrawString(g, text, r, GetFont("default"), textColor, sx, sy, alignH);
         }
     };
 
     class TextBox : public Control {
     public:
         std::wstring text;
-        Font* font = nullptr;
-        bool isEditing = false;
-        TextBox(const std::string& name) : Control(name) {
-            font = GetFont("default");
-        }
+        TextBox(const std::string& name) : Control(name) {}
         void Draw(Gdiplus::Graphics* g) override {
             RECT r = GetRect();
             auto& gs = detail::GS();
             FillRect(g, r, gs.theme.fg);
             DrawRect(g, r, (gs.focused == this) ? gs.theme.accent : gs.theme.border);
             RECT tr = r; tr.left += 3; tr.right -= 3;
-            DrawString(g, text.empty() ? L" " : text, tr, font, gs.theme.text, Gdiplus::StringAlignmentNear);
+            float sx, sy; GetScale(sx, sy);
+            DrawString(g, text.empty() ? L" " : text, tr, GetFont("default"), gs.theme.text, sx, sy, Gdiplus::StringAlignmentNear);
         }
         void OnLButtonDown(int,int) override {
-            if (!isEditing) {
-                isEditing = true;
-                Core::ShowInvisibleEdit(GetRect(), text);
-                auto& gs = detail::GS();
-                gs.onEditFinished = [this](const std::wstring& newText) {
-                    text = newText;
-                    isEditing = false;
-                    if (onTextChanged) onTextChanged(text);
-                    InvalidateRect(detail::GS().hwnd, nullptr, FALSE);
-                };
-            }
-        }
-        void OnKeyDown(WPARAM key) override {
-            if (key == VK_RETURN && !isEditing) OnLButtonDown(0,0);
+            // 每次点击都激活编辑框，无需 isEditing 标志
+            Core::ShowInvisibleEdit(GetRect(), text);
+            detail::GS().onEditFinished = [this](const std::wstring& newText) {
+                text = newText;
+                if (onTextChanged) onTextChanged(text);
+                InvalidateRect(detail::GS().hwnd, nullptr, FALSE);
+            };
         }
     };
 
@@ -432,17 +402,15 @@ namespace Controls {
         int selectedIndex = -1;
         bool expanded = false;
         int itemHeight = 24;
-        Font* font = nullptr;
-        ComboBox(const std::string& name) : Control(name) {
-            font = GetFont("default");
-        }
+        ComboBox(const std::string& name) : Control(name) {}
         void Draw(Gdiplus::Graphics* g) override {
             RECT r = GetRect();
             auto& gs = detail::GS();
             DrawBtnBg(g, r, gs.defaultBtnStyle.bgNormal, gs.defaultBtnStyle.radius);
             RECT textRect = r; textRect.right -= 20;
             std::wstring txt = (selectedIndex >=0 && selectedIndex < (int)items.size()) ? items[selectedIndex] : L"";
-            DrawString(g, txt, textRect, font, gs.defaultBtnStyle.textColor, Gdiplus::StringAlignmentNear);
+            float sx, sy; GetScale(sx, sy);
+            DrawString(g, txt, textRect, GetFont("default"), gs.defaultBtnStyle.textColor, sx, sy, Gdiplus::StringAlignmentNear);
             RECT arrowRect = { r.right - 20, r.top, r.right, r.bottom };
             DrawComboArrow(g, arrowRect, expanded, gs.defaultBtnStyle.textColor);
             if (expanded) {
@@ -450,12 +418,25 @@ namespace Controls {
                 for (size_t i = 0; i < items.size(); ++i) {
                     RECT ir = { r.left, y, r.right, y + itemHeight };
                     FillRect(g, ir, gs.theme.fg);
-                    DrawString(g, items[i], ir, font, gs.defaultBtnStyle.textColor, Gdiplus::StringAlignmentNear);
+                    DrawString(g, items[i], ir, GetFont("default"), gs.defaultBtnStyle.textColor, sx, sy, Gdiplus::StringAlignmentNear);
                     y += itemHeight;
                 }
             }
         }
-        void OnLButtonDown(int,int) override { expanded = !expanded; }
+        void OnLButtonDown(int x, int y) override {
+            if (expanded) {
+                RECT r = GetRect();
+                int baseY = r.bottom;
+                int idx = (y - baseY) / itemHeight;
+                if (x >= r.left && x < r.right && idx >= 0 && idx < (int)items.size()) {
+                    selectedIndex = idx;
+                }
+                expanded = false;
+            } else {
+                expanded = true;
+            }
+            InvalidateRect(detail::GS().hwnd, nullptr, FALSE);
+        }
     };
 
     class Image : public Control {
@@ -468,17 +449,12 @@ namespace Controls {
         void Draw(Gdiplus::Graphics* g) override { DrawImage(g, image, GetRect()); }
     };
 
-    // 控件管理
-    inline void AddControl(std::shared_ptr<Control> ctrl) {
-        detail::GS().controls[ctrl->name] = ctrl;
-    }
+    // 控件管理器
+    inline void AddControl(std::shared_ptr<Control> ctrl) { detail::GS().controls[ctrl->name] = ctrl; }
     inline Control* FindControl(const std::string& name) {
         auto& m = detail::GS().controls;
         auto it = m.find(name);
         return (it != m.end()) ? it->second.get() : nullptr;
-    }
-    inline void RemoveControl(const std::string& name) {
-        detail::GS().controls.erase(name);
     }
     inline void DrawAll(Gdiplus::Graphics* g) {
         for (auto& kv : detail::GS().controls)
@@ -489,10 +465,7 @@ namespace Controls {
         for (auto& kv : gs.controls) {
             auto c = kv.second.get();
             if (c->visible && c->PtInRect(x, y)) {
-                if (gs.hovered != c) {
-                    if (gs.hovered) gs.hovered->OnMouseLeave();
-                    gs.hovered = c;
-                }
+                if (gs.hovered != c) { if (gs.hovered) gs.hovered->OnMouseLeave(); gs.hovered = c; }
                 c->OnMouseMove(x, y);
                 return;
             }
@@ -504,8 +477,7 @@ namespace Controls {
         for (auto& kv : gs.controls) {
             auto c = kv.second.get();
             if (c->visible && c->PtInRect(x, y)) {
-                gs.focused = c;
-                gs.pressed = c;
+                gs.focused = c; gs.pressed = c;
                 c->OnLButtonDown(x, y);
                 return;
             }
@@ -516,8 +488,7 @@ namespace Controls {
         auto& gs = detail::GS();
         if (gs.pressed) {
             gs.pressed->OnLButtonUp(x, y);
-            if (gs.pressed->PtInRect(x, y) && gs.pressed->onClick)
-                gs.pressed->onClick();
+            if (gs.pressed->PtInRect(x, y) && gs.pressed->onClick) gs.pressed->onClick();
             gs.pressed = nullptr;
         }
     }
@@ -527,7 +498,7 @@ namespace Controls {
 
 } // namespace Controls
 
-// Control::GetRect 实现（依赖 detail::GS）
+// Control 辅助方法
 inline RECT Control::GetRect() const {
     auto& gs = detail::GS();
     if (!gs.autoScale) return originalRect;
@@ -539,6 +510,11 @@ inline RECT Control::GetRect() const {
     r.right  = (LONG)(originalRect.right * sx);
     r.bottom = (LONG)(originalRect.bottom * sy);
     return r;
+}
+inline void Control::GetScale(float& sx, float& sy) const {
+    auto& gs = detail::GS();
+    sx = gs.autoScale ? (float)gs.clientRect.right / gs.baseWidth : 1.0f;
+    sy = gs.autoScale ? (float)gs.clientRect.bottom / gs.baseHeight : 1.0f;
 }
 
 // 隐形输入框实现
@@ -570,70 +546,89 @@ namespace Core {
         SetFocus(gs.invisibleEdit);
         SendMessage(gs.invisibleEdit, EM_SETSEL, 0, -1);
     }
-} // namespace Core
+}
 
 // =============================================================================
-// 公共 API 对象
+// 公共 API
 // =============================================================================
+
+struct Application {
+    std::wstring title = L"easy_UI Application";
+    int width = 800, height = 600;
+    std::function<void()> OnInit;
+};
+
+inline LRESULT CALLBACK InternalWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto& gs = detail::GS();
+
+    switch (msg) {
+        case WM_CLOSE: DestroyWindow(hwnd); break;
+        case WM_DESTROY: PostQuitMessage(0); break;
+        case WM_ERASEBKGND: return 1;
+    }
+
+    if (!gs.gdiplusInit) return DefWindowProc(hwnd, msg, wParam, lParam);
+
+    switch (msg) {
+        case WM_SIZE:
+            gs.clientRect.right = LOWORD(lParam);
+            gs.clientRect.bottom = HIWORD(lParam);
+            InvalidateRect(hwnd, NULL, TRUE);
+            UpdateWindow(hwnd);
+            break;
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hwnd, &ps);
+            int w = gs.clientRect.right, h = gs.clientRect.bottom;
+            if (w > 0 && h > 0) {
+                if (!gs.memDC || gs.bufWidth != w || gs.bufHeight != h) {
+                    if (gs.memDC) {
+                        SelectObject(gs.memDC, gs.oldBitmap);
+                        DeleteObject(gs.memBitmap);
+                        DeleteDC(gs.memDC);
+                    }
+                    gs.memDC = CreateCompatibleDC(hdc);
+                    gs.memBitmap = CreateCompatibleBitmap(hdc, w, h);
+                    gs.oldBitmap = (HBITMAP)SelectObject(gs.memDC, gs.memBitmap);
+                    gs.bufWidth = w; gs.bufHeight = h;
+                    // 立即清空新缓冲区
+                    RECT full = {0,0,w,h};
+                    Gdiplus::Graphics gtmp(gs.memDC);
+                    Core::FillRect(&gtmp, full, gs.theme.bg);
+                }
+                Core::GfxWrap gfx(gs.memDC);
+                if (!gs.antiAlias) gfx->SetSmoothingMode(Gdiplus::SmoothingModeNone);
+                Core::FillRect(gfx.Get(), gs.clientRect, gs.theme.bg);
+                Controls::DrawAll(gfx.Get());
+                BitBlt(hdc, 0, 0, w, h, gs.memDC, 0, 0, SRCCOPY);
+            }
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        case WM_MOUSEMOVE:
+            Controls::DispatchMouseMove(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+            InvalidateRect(hwnd, nullptr, FALSE);
+            break;
+        case WM_LBUTTONDOWN:
+            Controls::DispatchLButtonDown(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+            InvalidateRect(hwnd, nullptr, FALSE);
+            break;
+        case WM_LBUTTONUP:
+            Controls::DispatchLButtonUp(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+            InvalidateRect(hwnd, nullptr, FALSE);
+            break;
+        case WM_KEYDOWN:
+            Controls::DispatchKeyDown(wParam);
+            break;
+    }
+    return DefWindowProc(hwnd, msg, wParam, lParam);
+}
 
 struct EasyUI {
-    bool Init(HWND hwnd, int baseW = 800, int baseH = 600) {
-        auto& gs = detail::GS();
-        gs.hwnd = hwnd;
-        gs.baseWidth = baseW; gs.baseHeight = baseH;
-        Core::InitGDIPlus(gs.gdiplusToken);
-        gs.gdiplusInit = true;
-        Core::AddFont("default", L"Segoe UI", 14.0f);
-        return true;
+    void SetGlobalFont(const wchar_t* family, float size = 14, int style = Gdiplus::FontStyleRegular) {
+        Core::AddFont("default", family, size, style);
     }
 
-    void Shutdown() {
-        auto& gs = detail::GS();
-        if (gs.gdiplusInit)
-            Core::ShutdownGDIPlus(gs.gdiplusToken);
-        gs.controls.clear();
-        if (gs.memDC) {
-            SelectObject(gs.memDC, gs.oldBitmap);
-            DeleteObject(gs.memBitmap);
-            DeleteDC(gs.memDC);
-            gs.memDC = nullptr;
-        }
-    }
-
-    void OnSize(int width, int height) {
-        auto& gs = detail::GS();
-        gs.clientRect.right = width;
-        gs.clientRect.bottom = height;
-        InvalidateRect(gs.hwnd, nullptr, FALSE);
-    }
-
-    void Render(HDC hdc) {
-        auto& gs = detail::GS();
-        int w = gs.clientRect.right;
-        int h = gs.clientRect.bottom;
-        if (w <= 0 || h <= 0) return;
-
-        if (!gs.memDC || gs.bufWidth != w || gs.bufHeight != h) {
-            if (gs.memDC) {
-                SelectObject(gs.memDC, gs.oldBitmap);
-                DeleteObject(gs.memBitmap);
-                DeleteDC(gs.memDC);
-            }
-            gs.memDC = CreateCompatibleDC(hdc);
-            gs.memBitmap = CreateCompatibleBitmap(hdc, w, h);
-            gs.oldBitmap = (HBITMAP)SelectObject(gs.memDC, gs.memBitmap);
-            gs.bufWidth = w; gs.bufHeight = h;
-        }
-
-        Core::GfxWrap gfx(gs.memDC);
-        if (!gs.antiAlias) gfx->SetSmoothingMode(Gdiplus::SmoothingModeNone);
-
-        Core::FillRect(gfx.Get(), gs.clientRect, gs.theme.bg);
-        Controls::DrawAll(gfx.Get());
-        BitBlt(hdc, 0, 0, w, h, gs.memDC, 0, 0, SRCCOPY);
-    }
-
-    // ---------- 控件创建 ----------
     std::string CreateButton(const std::string& name, const std::wstring& text, int x, int y, int w, int h) {
         auto btn = std::make_shared<Controls::Button>(name, text);
         btn->originalRect = { x, y, x + w, y + h };
@@ -665,7 +660,6 @@ struct EasyUI {
         return name;
     }
 
-    // ---------- 文本属性（重载：通过参数个数区分 get/set） ----------
     void Text(const std::string& name, const std::wstring& text) {
         auto c = Controls::FindControl(name);
         if (auto btn = dynamic_cast<Controls::Button*>(c)) btn->text = text;
@@ -680,15 +674,17 @@ struct EasyUI {
         if (auto tb = dynamic_cast<Controls::TextBox*>(c)) return tb->text;
         return L"";
     }
-
     void Visible(const std::string& name, bool vis) {
         if (auto c = Controls::FindControl(name)) c->visible = vis;
+        InvalidateRect(detail::GS().hwnd, nullptr, FALSE);
     }
     void Enable(const std::string& name, bool en) {
         if (auto c = Controls::FindControl(name)) c->enabled = en;
+        InvalidateRect(detail::GS().hwnd, nullptr, FALSE);
     }
     void Rect(const std::string& name, int x, int y, int w, int h) {
         if (auto c = Controls::FindControl(name)) c->originalRect = {x,y,x+w,y+h};
+        InvalidateRect(detail::GS().hwnd, nullptr, FALSE);
     }
     void OnClick(const std::string& name, std::function<void()> fn) {
         if (auto c = Controls::FindControl(name)) c->onClick = fn;
@@ -697,11 +693,24 @@ struct EasyUI {
         if (auto c = Controls::FindControl(name)) c->onTextChanged = fn;
     }
 
-    // ---------- 样式定制 ----------
+    void AddComboItem(const std::string& name, const std::wstring& item) {
+        auto c = Controls::FindControl(name);
+        if (auto cb = dynamic_cast<Controls::ComboBox*>(c)) cb->items.push_back(item);
+    }
+    int GetComboIndex(const std::string& name) {
+        auto c = Controls::FindControl(name);
+        if (auto cb = dynamic_cast<Controls::ComboBox*>(c)) return cb->selectedIndex;
+        return -1;
+    }
+    std::vector<std::wstring> GetComboItems(const std::string& name) {
+        auto c = Controls::FindControl(name);
+        if (auto cb = dynamic_cast<Controls::ComboBox*>(c)) return cb->items;
+        return {};
+    }
+
     void SetBtnStyle(const std::string& name, const BtnStyle& style) {
         auto c = Controls::FindControl(name);
-        if (auto btn = dynamic_cast<Controls::Button*>(c))
-            btn->style = std::unique_ptr<BtnStyle>(new BtnStyle(style));
+        if (auto btn = dynamic_cast<Controls::Button*>(c)) btn->style = std::unique_ptr<BtnStyle>(new BtnStyle(style));
         InvalidateRect(detail::GS().hwnd, nullptr, FALSE);
     }
     void SetGlobalBtnStyle(const BtnStyle& style) {
@@ -710,11 +719,10 @@ struct EasyUI {
     }
     void SetLabelColor(const std::string& name, const Color& color) {
         auto c = Controls::FindControl(name);
-        if (auto lbl = dynamic_cast<Controls::Label*>(c))
-            lbl->textColor = color;
+        if (auto lbl = dynamic_cast<Controls::Label*>(c)) lbl->textColor = color;
+        InvalidateRect(detail::GS().hwnd, nullptr, FALSE);
     }
 
-    // ---------- 缩放与抗锯齿 ----------
     void SetAutoScale(bool enable, int baseW = 0, int baseH = 0) {
         auto& gs = detail::GS();
         gs.autoScale = enable;
@@ -726,49 +734,50 @@ struct EasyUI {
         detail::GS().antiAlias = on;
         InvalidateRect(detail::GS().hwnd, nullptr, FALSE);
     }
-
-    void SetTheme(const Theme& theme) { detail::GS().theme = theme; }
+    void SetTheme(const Theme& theme) { detail::GS().theme = theme; InvalidateRect(detail::GS().hwnd, nullptr, FALSE); }
     Theme& Theme() { return detail::GS().theme; }
-
-    // ---------- 消息分发 ----------
-    LRESULT HandleMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-        switch (msg) {
-            case WM_SIZE:
-                OnSize(LOWORD(lParam), HIWORD(lParam));
-                break;
-            case WM_PAINT: {
-                PAINTSTRUCT ps;
-                HDC hdc = BeginPaint(hwnd, &ps);
-                Render(hdc);
-                EndPaint(hwnd, &ps);
-                return 0;
-            }
-            case WM_MOUSEMOVE:
-                Controls::DispatchMouseMove(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
-                InvalidateRect(hwnd, nullptr, FALSE);
-                break;
-            case WM_LBUTTONDOWN:
-                Controls::DispatchLButtonDown(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
-                InvalidateRect(hwnd, nullptr, FALSE);
-                break;
-            case WM_LBUTTONUP:
-                Controls::DispatchLButtonUp(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
-                InvalidateRect(hwnd, nullptr, FALSE);
-                break;
-            case WM_KEYDOWN:
-                Controls::DispatchKeyDown(wParam);
-                break;
-            case WM_DESTROY:
-                Shutdown();
-                PostQuitMessage(0);
-                break;
-        }
-        return DefWindowProc(hwnd, msg, wParam, lParam);
-    }
 };
 
-// 全局唯一对象（单编译单元安全）
-static EasyUI easyUI;
+static EasyUI ui;
+
+inline int Run(const Application& app) {
+    auto& gs = detail::GS();
+    WNDCLASSEX wc = { sizeof(WNDCLASSEX), CS_HREDRAW|CS_VREDRAW, InternalWndProc, 0,0,
+                      GetModuleHandle(nullptr), nullptr, LoadCursor(nullptr, IDC_ARROW),
+                      (HBRUSH)(COLOR_WINDOW+1), nullptr, L"EasyUIWindow", nullptr };
+    RegisterClassEx(&wc);
+
+    gs.baseWidth = app.width;
+    gs.baseHeight = app.height;
+    gs.clientRect = {0, 0, app.width, app.height};
+
+    HWND hwnd = CreateWindowEx(0, L"EasyUIWindow", app.title.c_str(),
+                               WS_OVERLAPPEDWINDOW,
+                               CW_USEDEFAULT, CW_USEDEFAULT, app.width, app.height,
+                               nullptr, nullptr, GetModuleHandle(nullptr), nullptr);
+    if (!hwnd) return -1;
+
+    gs.hwnd = hwnd;
+    Core::InitGDIPlus(gs.gdiplusToken);
+    gs.gdiplusInit = true;
+    Core::AddFont("default", L"Microsoft YaHei", 14);
+    ui.SetGlobalFont(L"Microsoft YaHei", 14);
+
+    if (app.OnInit) app.OnInit();
+
+    ShowWindow(hwnd, SW_SHOW);
+    UpdateWindow(hwnd);
+
+    MSG msg;
+    while (GetMessage(&msg, nullptr, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+
+    gs.controls.clear();
+    if (gs.gdiplusInit) Core::ShutdownGDIPlus(gs.gdiplusToken);
+    return 0;
+}
 
 } // namespace easyUI
 
