@@ -1,6 +1,6 @@
 /*
    easy_UI.hpp - 轻量级 Windows UI 渲染库 (C++11 / Win32 + GDI+)
-   版本: 4.2 (ComboBox 完全修复)
+   版本: 4.2 (ComboBox 交互完全修复)
    描述: 单头文件 UI 库，三层架构分离，全功能封装，零 Win32 消息暴露。
    用法: #include "easy_UI.hpp" 并链接 gdiplus.lib
 */
@@ -114,7 +114,7 @@ public:
 
     RECT GetRect() const;
     void GetScale(float& sx, float& sy) const;
-    bool PtInRect(int x, int y) const {
+    virtual bool PtInRect(int x, int y) const {
         RECT r = GetRect();
         return x >= r.left && x < r.right && y >= r.top && y < r.bottom;
     }
@@ -406,6 +406,24 @@ namespace Controls {
 
         ComboBox(const std::string& name) : Control(name) {}
 
+        // 重写 PtInRect：展开时包含下拉列表区域
+        bool PtInRect(int x, int y) const override {
+            if (!visible) return false;
+            RECT r = GetRect();
+            if (x >= r.left && x < r.right && y >= r.top && y < r.bottom)
+                return true;
+            if (expanded) {
+                float sx, sy; GetScale(sx, sy);
+                int scaledItemHeight = (int)(itemHeight * sy);
+                if (scaledItemHeight < 20) scaledItemHeight = 20;
+                int totalHeight = (int)items.size() * scaledItemHeight;
+                RECT dropRect = { r.left, r.bottom, r.right, r.bottom + totalHeight };
+                if (x >= dropRect.left && x < dropRect.right && y >= dropRect.top && y < dropRect.bottom)
+                    return true;
+            }
+            return false;
+        }
+
         void Draw(Gdiplus::Graphics* g) override {
             RECT r = GetRect();
             auto& gs = detail::GS();
@@ -454,12 +472,13 @@ namespace Controls {
         }
 
         void OnLButtonDown(int x, int y) override {
+            RECT r = GetRect();
+            float sx, sy; GetScale(sx, sy);
+            int scaledItemHeight = (int)(itemHeight * sy);
+            if (scaledItemHeight < 20) scaledItemHeight = 20;
+
             if (expanded) {
-                // 已经展开：判断点击是否在选项区域
-                RECT r = GetRect();
-                float sx, sy; GetScale(sx, sy);
-                int scaledItemHeight = (int)(itemHeight * sy);
-                if (scaledItemHeight < 20) scaledItemHeight = 20;
+                // 判断是否点击了下拉选项区域
                 int baseY = r.bottom;
                 if (y >= baseY && x >= r.left && x < r.right) {
                     int idx = (y - baseY) / scaledItemHeight;
@@ -467,9 +486,10 @@ namespace Controls {
                         selectedIndex = idx;
                     }
                 }
-                expanded = false;  // 无论如何关闭下拉
+                expanded = false;
             } else {
-                expanded = true;   // 打开下拉
+                // 点击主体区域才展开（已经在 PtInRect 中保证）
+                expanded = true;
             }
             InvalidateRect(detail::GS().hwnd, nullptr, FALSE);
             UpdateWindow(detail::GS().hwnd);
